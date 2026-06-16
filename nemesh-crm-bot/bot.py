@@ -178,9 +178,10 @@ async def got_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = update.message.text.strip()
     context.user_data["sum"] = text
+    keyboard = ReplyKeyboardMarkup([["⏭ Пропустити"]], one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
-        "Дата старту роботи? (формат: 18.06.2025)\n"
-        "Якщо ще невідома — напиши 'пропустити'"
+        "Дата старту роботи? (формат: 18.06.2025)",
+        reply_markup=keyboard
     )
     return WAIT_START_DATE
 
@@ -194,7 +195,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_date = None
     due_iso = None
 
-    if text.lower() != "пропустити":
+    if text.lower() not in ["пропустити", "⏭ пропустити", "пропустити", "skip"]:
         try:
             start_date = datetime.strptime(text, "%d.%m.%Y")
             due_iso = start_date.isoformat() + "Z"
