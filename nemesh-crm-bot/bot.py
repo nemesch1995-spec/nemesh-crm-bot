@@ -178,10 +178,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
 
-    desc = (
-        f"📋 Summary:\n{summary}\n\n"
-        f"📞 Контакти:\n{contacts}"
-    )
+    desc = f"📞 Контакти:\n{contacts}"
 
     list_id = COLUMNS.get("новий лід")
     if not list_id:
@@ -192,6 +189,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_custom_field_sum(card["id"], amount)
     if start_date:
         set_custom_field_date(card["id"], start_date.strftime("%Y-%m-%dT00:00:00.000Z"))
+    add_comment(card["id"], f"📋 Summary:\n{summary}")
 
     # Планування нагадувань
     chat_id = update.effective_chat.id
