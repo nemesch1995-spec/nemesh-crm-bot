@@ -386,6 +386,34 @@ async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+def handle_voice_in_conv(next_handler):
+    """Обгортка для голосових під час розмови"""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        voice = update.message.voice
+        if not OPENAI_API_KEY:
+            await update.message.reply_text("❌ OpenAI API ключ не налаштований")
+            return
+        await update.message.reply_text("🎙 Розпізнаю...")
+        try:
+            import tempfile
+            file = await context.bot.get_file(voice.file_id)
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                await file.download_to_drive(tmp.name)
+                tmp_path = tmp.name
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            with open(tmp_path, "rb") as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", file=audio_file, language="uk"
+                )
+            update.message.text = transcript.text
+            await update.message.reply_text(f"📝 {transcript.text}")
+            return await next_handler(update, context)
+        except Exception as e:
+            logger.error(f"Voice error: {e}")
+            await update.message.reply_text("❌ Помилка розпізнавання")
+    return wrapper
+
 # ───────────────────────────────────────────────
 # ГОЛОСОВІ ПОВІДОМЛЕННЯ
 # ───────────────────────────────────────────────
@@ -416,9 +444,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = transcript.text
         await update.message.reply_text(f"📝 Розпізнано: {text}")
 
-        # Передаємо текст в smart_handler як звичайне повідомлення
+        # Підміняємо голосове на текстове і передаємо далі
         update.message.text = text
-        await smart_handler(update, context)
 
     except Exception as e:
         logger.error(f"Voice error: {e}")
@@ -471,11 +498,11 @@ def main():
     new_lead_conv = ConversationHandler(
         entry_points=[CommandHandler("new_lead", new_lead_start)],
         states={
-            WAIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
-            WAIT_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_summary)],
-            WAIT_CONTACTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_contacts)],
-            WAIT_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sum)],
-            WAIT_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_start_date)],
+            WAIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name), MessageHandler(filters.VOICE, handle_voice_in_conv(got_name))],
+            WAIT_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_summary), MessageHandler(filters.VOICE, handle_voice_in_conv(got_summary))],
+            WAIT_CONTACTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_contacts), MessageHandler(filters.VOICE, handle_voice_in_conv(got_contacts))],
+            WAIT_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sum), MessageHandler(filters.VOICE, handle_voice_in_conv(got_sum))],
+            WAIT_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_start_date), MessageHandler(filters.VOICE, handle_voice_in_conv(got_start_date))],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
