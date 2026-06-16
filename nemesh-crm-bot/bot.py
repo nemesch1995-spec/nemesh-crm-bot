@@ -43,12 +43,12 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
 
 # Колонки дошки
 COLUMNS = {
-    "новий лід": None,
-    "перемовини": None,
-    "в роботі": None,
-    "пауза в роботі": None,
-    "відмова": None,
-    "не ліквід": None,
+    "новий лід": "6a315f500cf27f0f4e7be45a",
+    "перемовини": "6a315f6bff39a1ef901f07ae",
+    "в роботі": "6a315f710dfcc8d8f1625bf1",
+    "пауза в роботі": "6a315f7ade44f22387f91208",
+    "відмова": "6a315f80792f2a4d1eb5b52b",
+    "не ліквід": "6a315f85700fc99b8e599abe",
 }
 
 scheduler = AsyncIOScheduler()
@@ -63,16 +63,18 @@ def trello_params(**kwargs):
 def load_lists():
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/lists", params=trello_params())
     for lst in r.json():
-        name = lst["name"].lower()
+        name = lst["name"].lower().replace("і", "i")
         for col in COLUMNS:
-            if col in name:
+            col_norm = col.lower().replace("і", "i")
+            if col_norm in name:
                 COLUMNS[col] = lst["id"]
                 break
 
 def get_list_id(name: str):
-    name = name.lower()
+    name = name.lower().replace("і", "i")
     for col, lid in COLUMNS.items():
-        if col in name or name in col:
+        col_norm = col.lower().replace("і", "i")
+        if col_norm in name or name in col_norm:
             return lid
     return None
 
