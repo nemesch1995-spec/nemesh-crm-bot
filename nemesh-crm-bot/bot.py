@@ -36,7 +36,8 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
     WAIT_COMMENT_NAME, WAIT_COMMENT_TEXT,
     WAIT_MOVE_NAME, WAIT_MOVE_STATUS,
     WAIT_REMIND_NAME, WAIT_REMIND_TIME,
-) = range(11)
+    WAIT_COMMENT_REMIND,
+) = range(12)
 
 # Колонки дошки
 COLUMNS = {
@@ -292,8 +293,24 @@ async def comment_got_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = update.message.text.strip()
     add_comment(context.user_data["card_id"], text)
-    await update.message.reply_text(f"✅ Коментар додано до *{context.user_data['card_name']}*", parse_mode="Markdown")
-    return ConversationHandler.END
+    keyboard = ReplyKeyboardMarkup([["⏰ Так, нагадати", "✅ Ні, все"]], one_time_keyboard=True, resize_keyboard=True)
+    name = context.user_data["card_name"]
+    await update.message.reply_text(
+        f"\u2705 Коментар додано до *{name}*\n\nПоставити нагадування по цьому клієнту?",
+        parse_mode="Markdown"
+    )
+    return WAIT_COMMENT_REMIND
+
+async def comment_got_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    if "ні" in text or "все" in text:
+        await update.message.reply_text("👍", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "Коли нагадати?\n• через 3 дні\n• через 2 тижні\n• 25.06.2025",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return WAIT_REMIND_TIME
 
 # ───────────────────────────────────────────────
 # ЗМІНА СТАТУСУ
@@ -541,6 +558,8 @@ def main():
         states={
             WAIT_COMMENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_name), MessageHandler(filters.VOICE, comment_got_name)],
             WAIT_COMMENT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_text), MessageHandler(filters.VOICE, comment_got_text)],
+            WAIT_COMMENT_REMIND: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_remind)],
+            WAIT_REMIND_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, remind_got_time)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
