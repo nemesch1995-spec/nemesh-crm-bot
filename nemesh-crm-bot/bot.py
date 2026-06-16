@@ -37,7 +37,8 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
     WAIT_MOVE_NAME, WAIT_MOVE_STATUS,
     WAIT_REMIND_NAME, WAIT_REMIND_TIME,
     WAIT_COMMENT_REMIND,
-) = range(12)
+    WAIT_SETDATE_CLIENT, WAIT_SETDATE_DATE,
+) = range(14)
 
 # Колонки дошки
 COLUMNS = {
@@ -126,6 +127,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔀 /move — змінити статус\n"
         "⏰ /remind — нагадування\n"
         "📋 /clients — список активних клієнтів\n\n"
+        "• /setdate — встановити дату старту\n\n"
         "Або просто пиши текстом — я зрозумію!"
     )
 
@@ -496,6 +498,116 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Voice error: {e}")
         await update.message.reply_text("❌ Помилка розпізнавання. Спробуй ще раз.")
 
+
+# ───────────────────────────────────────────────
+# ВСТАНОВИТИ ДАТУ СТАРТУ
+# ───────────────────────────────────────────────
+
+async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Отримуємо список клієнтів з колонок "В роботі" і "Новий лід" і "Перемовини"
+    r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
+    cards = r.json()
+
+    active_lists = []
+    for lid in [COLUMNS.get("в роботі"), COLUMNS.get("новий лід"), COLUMNS.get("перемовини")]:
+        if lid:
+            active_lists.append(lid)
+
+    active_cards = [c for c in cards if c.get("idList") in active_lists]
+
+    if not active_cards:
+        await update.message.reply_text("Немає активних клієнтів.")
+        return ConversationHandler.END
+
+    context.user_data["setdate_cards"] = {c["name"]: c["id"] for c in active_cards}
+
+    # Кнопки по 2 в ряд
+    names = [c["name"] for c in active_cards]
+    keyboard = [names[i:i+2] for i in range(0, len(names), 2)]
+    keyboard.append(["❌ Скасувати"])
+
+    await update.message.reply_text(
+        "Вибери клієнта:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return WAIT_SETDATE_CLIENT
+
+async def setdate_got_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "❌ Скасувати":
+        await update.message.reply_text("Скасовано.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+    cards = context.user_data.get("setdate_cards", {})
+    card_id = cards.get(text)
+
+    if not card_id:
+        # Спробуємо знайти часткове співпадіння
+        for name, cid in cards.items():
+            if text.lower() in name.lower():
+                card_id = cid
+                text = name
+                break
+
+    if not card_id:
+        await update.message.reply_text("❌ Клієнта не знайдено. Спробуй ще.")
+        return WAIT_SETDATE_CLIENT
+
+    context.user_data["setdate_card_id"] = card_id
+    context.user_data["setdate_card_name"] = text
+
+    await update.message.reply_text(
+        f"Дата старту для *{text}*? (формат: 18.06.2025)",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown"
+    )
+    return WAIT_SETDATE_DATE
+
+async def setdate_got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    card_id = context.user_data["setdate_card_id"]
+    name = context.user_data["setdate_card_name"]
+    chat_id = update.effective_chat.id
+
+    try:
+        start_date = datetime.strptime(text, "%d.%m.%Y")
+        set_custom_field_date(card_id, start_date.strftime("%Y-%m-%dT00:00:00.000Z"))
+
+        # Нагадування про оплату через місяць
+        payment_date = start_date + timedelta(days=30)
+        scheduler.add_job(
+            send_reminder,
+            "date",
+            run_date=payment_date,
+            args=[context.application, chat_id, f"💰 {name} — час виставити рахунок за наступний місяць!"],
+            id=f"payment_{card_id}",
+            replace_existing=True
+        )
+
+        # Чекін через 2 тижні
+        checkin_date = start_date + timedelta(days=14)
+        scheduler.add_job(
+            send_reminder,
+            "date",
+            run_date=checkin_date,
+            args=[context.application, chat_id, f"🔔 {name} — 2 тижні роботи. Напиши клієнту як справи з рекламою!"],
+            id=f"checkin_{card_id}",
+            replace_existing=True
+        )
+
+        msg = (
+            f"✅ Дата старту {text} встановлена для {name}\n\n"
+            f"Нагадування:\n"
+            f"• {checkin_date.strftime('%d.%m')} — чекін через 2 тижні\n"
+            f"• {payment_date.strftime('%d.%m')} — нагадування про оплату"
+        )
+        await update.message.reply_text(msg)
+    except ValueError:
+        await update.message.reply_text("❌ Невірний формат. Спробуй: 18.06.2025")
+        return WAIT_SETDATE_DATE
+
+    return ConversationHandler.END
+
 # ───────────────────────────────────────────────
 # РОЗПІЗНАВАННЯ ТЕКСТУ (без команд)
 # ───────────────────────────────────────────────
@@ -585,9 +697,20 @@ def main():
         allow_reentry=True,
     )
 
+    setdate_conv = ConversationHandler(
+        entry_points=[CommandHandler("setdate", setdate_start)],
+        states={
+            WAIT_SETDATE_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, setdate_got_client)],
+            WAIT_SETDATE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, setdate_got_date)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clients", list_clients))
     app.add_handler(new_lead_conv)
+    app.add_handler(setdate_conv)
     app.add_handler(comment_conv)
     app.add_handler(move_conv)
     app.add_handler(remind_conv)
