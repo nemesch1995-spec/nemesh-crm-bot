@@ -438,6 +438,7 @@ def main():
             WAIT_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_start_date)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     comment_conv = ConversationHandler(
@@ -447,6 +448,7 @@ def main():
             WAIT_COMMENT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     move_conv = ConversationHandler(
@@ -456,6 +458,7 @@ def main():
             WAIT_MOVE_STATUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, move_got_status)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     remind_conv = ConversationHandler(
@@ -465,6 +468,7 @@ def main():
             WAIT_REMIND_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, remind_got_time)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     app.add_handler(CommandHandler("start", start))
