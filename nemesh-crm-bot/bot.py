@@ -138,26 +138,46 @@ async def new_lead_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_NAME
 
 async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["name"] = update.message.text.strip()
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text: return WAIT_NAME
+    else:
+        text = update.message.text.strip()
+    context.user_data["name"] = text
     await update.message.reply_text(
         "Надиктуй summary розмови — про що говорили, що зрозумів, на чому зупинились:"
     )
     return WAIT_SUMMARY
 
 async def got_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["summary"] = update.message.text.strip()
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text: return WAIT_SUMMARY
+    else:
+        text = update.message.text.strip()
+    context.user_data["summary"] = text
     await update.message.reply_text(
         "Контактні дані — нік в Telegram, Instagram, сайт (що є, через кому):"
     )
     return WAIT_CONTACTS
 
 async def got_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["contacts"] = update.message.text.strip()
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text: return WAIT_CONTACTS
+    else:
+        text = update.message.text.strip()
+    context.user_data["contacts"] = text
     await update.message.reply_text("Сума (в євро):")
     return WAIT_SUM
 
 async def got_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["sum"] = update.message.text.strip()
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text: return WAIT_SUM
+    else:
+        text = update.message.text.strip()
+    context.user_data["sum"] = text
     await update.message.reply_text(
         "Дата старту роботи? (формат: 18.06.2025)\n"
         "Якщо ще невідома — напиши 'пропустити'"
@@ -250,7 +270,12 @@ async def comment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_COMMENT_NAME
 
 async def comment_got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    card = find_card(update.message.text.strip())
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text: return WAIT_COMMENT_NAME
+    else:
+        text = update.message.text.strip()
+    card = find_card(text)
     if not card:
         await update.message.reply_text("❌ Картку не знайдено. Перевір ім'я.")
         return ConversationHandler.END
@@ -260,7 +285,12 @@ async def comment_got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_COMMENT_TEXT
 
 async def comment_got_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    add_comment(context.user_data["card_id"], update.message.text.strip())
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text: return WAIT_COMMENT_TEXT
+    else:
+        text = update.message.text.strip()
+    add_comment(context.user_data["card_id"], text)
     await update.message.reply_text(f"✅ Коментар додано до *{context.user_data['card_name']}*", parse_mode="Markdown")
     return ConversationHandler.END
 
@@ -386,33 +416,28 @@ async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-def handle_voice_in_conv(next_handler):
-    """Обгортка для голосових під час розмови"""
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        voice = update.message.voice
-        if not OPENAI_API_KEY:
-            await update.message.reply_text("❌ OpenAI API ключ не налаштований")
-            return
-        await update.message.reply_text("🎙 Розпізнаю...")
-        try:
-            import tempfile
-            file = await context.bot.get_file(voice.file_id)
-            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-                await file.download_to_drive(tmp.name)
-                tmp_path = tmp.name
-            from openai import OpenAI
-            client = OpenAI(api_key=OPENAI_API_KEY)
-            with open(tmp_path, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1", file=audio_file, language="uk"
-                )
-            update.message.text = transcript.text
-            await update.message.reply_text(f"📝 {transcript.text}")
-            return await next_handler(update, context)
-        except Exception as e:
-            logger.error(f"Voice error: {e}")
-            await update.message.reply_text("❌ Помилка розпізнавання")
-    return wrapper
+
+async def transcribe_voice(update: Update) -> str | None:
+    """Розпізнає голосове і повертає текст"""
+    if not OPENAI_API_KEY:
+        await update.message.reply_text("❌ OpenAI API ключ не налаштований")
+        return None
+    await update.message.reply_text("🎙 Розпізнаю...")
+    try:
+        file = await update.get_bot().get_file(update.message.voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            tmp_path = tmp.name
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        with open(tmp_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", file=audio_file, language="uk"
+            )
+        return transcript.text
+    except Exception as e:
+        logger.error(f"Voice error: {e}")
+        await update.message.reply_text("❌ Помилка розпізнавання")
+        return None
 
 # ───────────────────────────────────────────────
 # ГОЛОСОВІ ПОВІДОМЛЕННЯ
@@ -498,11 +523,11 @@ def main():
     new_lead_conv = ConversationHandler(
         entry_points=[CommandHandler("new_lead", new_lead_start)],
         states={
-            WAIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name), MessageHandler(filters.VOICE, handle_voice_in_conv(got_name))],
-            WAIT_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_summary), MessageHandler(filters.VOICE, handle_voice_in_conv(got_summary))],
-            WAIT_CONTACTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_contacts), MessageHandler(filters.VOICE, handle_voice_in_conv(got_contacts))],
-            WAIT_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sum), MessageHandler(filters.VOICE, handle_voice_in_conv(got_sum))],
-            WAIT_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_start_date), MessageHandler(filters.VOICE, handle_voice_in_conv(got_start_date))],
+            WAIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name), MessageHandler(filters.VOICE, got_name)],
+            WAIT_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_summary), MessageHandler(filters.VOICE, got_summary)],
+            WAIT_CONTACTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_contacts), MessageHandler(filters.VOICE, got_contacts)],
+            WAIT_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sum), MessageHandler(filters.VOICE, got_sum)],
+            WAIT_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_start_date), MessageHandler(filters.VOICE, got_start_date)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
@@ -511,8 +536,8 @@ def main():
     comment_conv = ConversationHandler(
         entry_points=[CommandHandler("comment", comment_start)],
         states={
-            WAIT_COMMENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_name)],
-            WAIT_COMMENT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_text)],
+            WAIT_COMMENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_name), MessageHandler(filters.VOICE, comment_got_name)],
+            WAIT_COMMENT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_got_text), MessageHandler(filters.VOICE, comment_got_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
