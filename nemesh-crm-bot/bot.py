@@ -1,6 +1,8 @@
 import logging
 import os
 import requests
+import tempfile
+from openai import OpenAI
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -20,6 +22,7 @@ TRELLO_KEY = os.getenv("TRELLO_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID", "X9M3JzKk")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")  # твій Telegram ID
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 TRELLO_API = "https://api.trello.com/1"
 
@@ -382,6 +385,45 @@ async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
+
+# ───────────────────────────────────────────────
+# ГОЛОСОВІ ПОВІДОМЛЕННЯ
+# ───────────────────────────────────────────────
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Конвертує голосове повідомлення в текст через Whisper і обробляє як текст"""
+    voice = update.message.voice
+    if not OPENAI_API_KEY:
+        await update.message.reply_text("❌ OpenAI API ключ не налаштований")
+        return
+
+    await update.message.reply_text("🎙 Розпізнаю голосове...")
+
+    try:
+        file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            tmp_path = tmp.name
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        with open(tmp_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="uk"
+            )
+
+        text = transcript.text
+        await update.message.reply_text(f"📝 Розпізнано: {text}")
+
+        # Передаємо текст в smart_handler як звичайне повідомлення
+        update.message.text = text
+        await smart_handler(update, context)
+
+    except Exception as e:
+        logger.error(f"Voice error: {e}")
+        await update.message.reply_text("❌ Помилка розпізнавання. Спробуй ще раз.")
+
 # ───────────────────────────────────────────────
 # РОЗПІЗНАВАННЯ ТЕКСТУ (без команд)
 # ───────────────────────────────────────────────
@@ -476,6 +518,7 @@ def main():
     app.add_handler(move_conv)
     app.add_handler(remind_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, smart_handler))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     scheduler.start()
     app.run_polling()
