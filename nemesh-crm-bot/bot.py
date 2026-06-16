@@ -23,6 +23,10 @@ OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")  # твій Telegram ID
 
 TRELLO_API = "https://api.trello.com/1"
 
+# Користувацькі поля
+CUSTOM_FIELD_DATE = "6a315fbc2805833132e855f7"
+CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
+
 # Стани розмови
 (
     WAIT_NAME, WAIT_SUMMARY, WAIT_CONTACTS, WAIT_SUM, WAIT_START_DATE,
@@ -90,6 +94,20 @@ def move_card(card_id: str, list_id: str):
 
 def set_due_date(card_id: str, due: str):
     requests.put(f"{TRELLO_API}/cards/{card_id}", params=trello_params(due=due))
+
+def set_custom_field_date(card_id: str, date_iso: str):
+    requests.put(
+        f"{TRELLO_API}/card/{card_id}/customField/{CUSTOM_FIELD_DATE}/item",
+        json={"value": {"date": date_iso}},
+        params={"key": TRELLO_KEY, "token": TRELLO_TOKEN}
+    )
+
+def set_custom_field_sum(card_id: str, amount: str):
+    requests.put(
+        f"{TRELLO_API}/card/{card_id}/customField/{CUSTOM_FIELD_SUM}/item",
+        json={"value": {"text": amount}},
+        params={"key": TRELLO_KEY, "token": TRELLO_TOKEN}
+    )
 
 # ───────────────────────────────────────────────
 # /start
@@ -162,9 +180,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     desc = (
         f"📋 Summary:\n{summary}\n\n"
-        f"📞 Контакти:\n{contacts}\n\n"
-        f"💰 Сума: {amount} євро\n"
-        f"📅 Дата старту: {text if start_date else 'не вказана'}"
+        f"📞 Контакти:\n{contacts}"
     )
 
     list_id = COLUMNS.get("новий лід")
@@ -172,7 +188,10 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Не знайшов колонку 'Новий лід' на дошці.")
         return ConversationHandler.END
 
-    card = create_card(name, desc, list_id, due_iso)
+    card = create_card(name, desc, list_id)
+    set_custom_field_sum(card["id"], amount)
+    if start_date:
+        set_custom_field_date(card["id"], start_date.strftime("%Y-%m-%dT00:00:00.000Z"))
 
     # Планування нагадувань
     chat_id = update.effective_chat.id
