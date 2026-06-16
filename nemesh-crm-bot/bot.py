@@ -566,7 +566,7 @@ async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cards = r.json()
 
     active_lists = []
-    for lid in [COLUMNS.get("в роботі"), COLUMNS.get("новий лід"), COLUMNS.get("перемовини")]:
+    for lid in [COLUMNS.get("в роботі")]:
         if lid:
             active_lists.append(lid)
 
