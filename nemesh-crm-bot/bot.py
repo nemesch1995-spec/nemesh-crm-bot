@@ -38,7 +38,8 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
     WAIT_REMIND_NAME, WAIT_REMIND_TIME,
     WAIT_COMMENT_REMIND,
     WAIT_SETDATE_CLIENT, WAIT_SETDATE_DATE,
-) = range(14)
+    WAIT_NEWLEAD_REMIND, WAIT_NEWLEAD_REMIND_DATE,
+) = range(16)
 
 # Колонки дошки
 COLUMNS = {
@@ -255,15 +256,71 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             replace_existing=True
         )
 
-    await update.message.reply_text(
-        f"✅ Картку *{name}* створено в 'Новий лід'!\n\n"
-        f"📅 Нагадування поставлено:\n"
-        f"• Через 3 дні — follow-up якщо немає відповіді\n"
-        + (f"• {(start_date + timedelta(days=14)).strftime('%d.%m')} — чекін через 2 тижні\n"
-           f"• {(start_date + timedelta(days=30)).strftime('%d.%m')} — нагадування про оплату" if start_date else ""),
-        parse_mode="Markdown"
+    keyboard = ReplyKeyboardMarkup(
+        [["⏰ Нагадати через 3 дні", "📅 Вказати дату"], ["✅ Не треба"]],
+        one_time_keyboard=True, resize_keyboard=True
     )
+    reminders_text = ""
+    if start_date:
+        reminders_text = (
+            f"\n\n📅 Авто-нагадування:\n"
+            f"• {(start_date + timedelta(days=14)).strftime('%d.%m')} — чекін\n"
+            f"• {(start_date + timedelta(days=30)).strftime('%d.%m')} — оплата"
+        )
+    context.user_data["card_id_new"] = card["id"]
+    context.user_data["card_name_new"] = name
+    await update.message.reply_text(
+        f"\u2705 Картку {name} створено!{reminders_text}\n\nДодаткове нагадування?",
+        reply_markup=keyboard
+    )
+    return WAIT_NEWLEAD_REMIND
+
+async def newlead_got_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    chat_id = update.effective_chat.id
+    name = context.user_data.get("card_name_new", "")
+    card_id = context.user_data.get("card_id_new", "")
+
+    if "не треба" in text.lower() or "✅" in text:
+        await update.message.reply_text("👍", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    elif "3 дні" in text.lower():
+        remind_time = datetime.now() + timedelta(days=3)
+        scheduler.add_job(
+            send_reminder, "date", run_date=remind_time,
+            args=[context.application, chat_id, f"⏰ Нагадування: {name}"],
+            id=f"custom_remind_{card_id}", replace_existing=True
+        )
+        await update.message.reply_text(
+            f"✅ Нагадаю через 3 дні про {name}",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "Вкажи дату нагадування (формат: 25.06.2025):",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return WAIT_NEWLEAD_REMIND_DATE
+
+async def newlead_got_remind_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    chat_id = update.effective_chat.id
+    name = context.user_data.get("card_name_new", "")
+    card_id = context.user_data.get("card_id_new", "")
+    try:
+        remind_time = datetime.strptime(text, "%d.%m.%Y")
+        scheduler.add_job(
+            send_reminder, "date", run_date=remind_time,
+            args=[context.application, chat_id, f"⏰ Нагадування: {name}"],
+            id=f"custom_remind_{card_id}", replace_existing=True
+        )
+        await update.message.reply_text(f"✅ Нагадаю {text} про {name}")
+    except ValueError:
+        await update.message.reply_text("❌ Невірний формат. Спробуй: 25.06.2025")
+        return WAIT_NEWLEAD_REMIND_DATE
     return ConversationHandler.END
+
 
 # ───────────────────────────────────────────────
 # КОМЕНТАР
@@ -660,6 +717,8 @@ def main():
             WAIT_CONTACTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_contacts), MessageHandler(filters.VOICE, got_contacts)],
             WAIT_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sum), MessageHandler(filters.VOICE, got_sum)],
             WAIT_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_start_date), MessageHandler(filters.VOICE, got_start_date)],
+            WAIT_NEWLEAD_REMIND: [MessageHandler(filters.TEXT & ~filters.COMMAND, newlead_got_remind)],
+            WAIT_NEWLEAD_REMIND_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newlead_got_remind_date)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
