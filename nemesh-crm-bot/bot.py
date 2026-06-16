@@ -444,8 +444,11 @@ async def transcribe_voice(update: Update) -> str | None:
 # ───────────────────────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Конвертує голосове повідомлення в текст через Whisper і обробляє як текст"""
-    voice = update.message.voice
+    """Конвертує голосове поза розмовою"""
+    # Якщо є активна розмова — не перехоплюємо
+    if context.user_data:
+        return
+
     if not OPENAI_API_KEY:
         await update.message.reply_text("❌ OpenAI API ключ не налаштований")
         return
@@ -453,7 +456,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎙 Розпізнаю голосове...")
 
     try:
-        file = await context.bot.get_file(voice.file_id)
+        file = await context.bot.get_file(update.message.voice.file_id)
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             await file.download_to_drive(tmp.name)
             tmp_path = tmp.name
@@ -468,9 +471,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = transcript.text
         await update.message.reply_text(f"📝 Розпізнано: {text}")
-
-        # Підміняємо голосове на текстове і передаємо далі
         update.message.text = text
+        await smart_handler(update, context)
 
     except Exception as e:
         logger.error(f"Voice error: {e}")
