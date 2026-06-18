@@ -626,7 +626,7 @@ async def debug_lists(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    load_lists()  # оновлюємо ID перед запитом
+    pass  # ID захардкоджені напряму
     list_id = COLUMNS.get("в роботі")
     if not list_id:
         await update.message.reply_text("❌ Не знайшов колонку 'В роботі'")
@@ -763,9 +763,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ───────────────────────────────────────────────
 
 async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Перезавантажуємо списки щоб мати актуальні ID
-    load_lists()
-
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
     cards = r.json()
 
@@ -909,8 +906,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ───────────────────────────────────────────────
 
 def main():
-    load_lists()
-
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     new_lead_conv = ConversationHandler(
