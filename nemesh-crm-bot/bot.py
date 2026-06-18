@@ -24,7 +24,7 @@ TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID", "X9M3JzKk")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TODOIST_TOKEN = os.getenv("TODOIST_TOKEN")
-TODOIST_API = "https://api.todoist.com/rest/v2"
+TODOIST_API = "https://api.todoist.com/api/v1"
 
 TRELLO_API = "https://api.trello.com/1"
 
