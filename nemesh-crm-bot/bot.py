@@ -23,6 +23,8 @@ TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID", "X9M3JzKk")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TODOIST_TOKEN = os.getenv("TODOIST_TOKEN")
+TODOIST_API = "https://api.todoist.com/rest/v2"
 
 TRELLO_API = "https://api.trello.com/1"
 
@@ -38,7 +40,8 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
     WAIT_SETDATE_CLIENT, WAIT_SETDATE_DATE,
     WAIT_NEWLEAD_REMIND, WAIT_NEWLEAD_REMIND_DATE,
     WAIT_STATS_QUERY,
-) = range(17)
+    WAIT_TASK_VOICE,
+) = range(18)
 
 COLUMNS = {
     "новий лід": "6a315f500cf27f0f4e7be45a",
@@ -933,6 +936,153 @@ async def client_info(update: Update, context: ContextTypes.DEFAULT_TYPE, name: 
 
     await update.message.reply_text(answer)
 
+
+# ───────────────────────────────────────────────
+# TODOIST — ПЛАНУВАННЯ ЗАДАЧ ГОЛОСОМ
+# ───────────────────────────────────────────────
+
+def gpt_parse_task(text: str) -> dict:
+    """GPT витягує з тексту: назву задачі, дату, час, пріоритет"""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    today = datetime.now().strftime("%d.%m.%Y")
+    prompt = f"""Сьогодні {today}. Ти — асистент з планування. 
+Проаналізуй текст і витягни задачу для Todoist.
+
+Текст: "{text}"
+
+Відповідай ТІЛЬКИ у форматі JSON (без markdown):
+{{
+  "title": "назва задачі",
+  "due_date": "YYYY-MM-DD або null якщо дата не вказана",
+  "due_time": "HH:MM або null якщо час не вказаний",
+  "priority": 4,
+  "description": "додаткові деталі якщо є або пустий рядок"
+}}
+
+Пріоритет: 4=звичайний, 3=середній, 2=високий, 1=терміновий.
+Визнач пріоритет за словами: терміново/важливо/критично → 1-2, звичайні задачі → 3-4.
+Дати: сьогодні={today}, завтра=наступний день, "в п'ятницю"=найближча п'ятниця тощо."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{{"role": "user", "content": prompt}}],
+            max_tokens=200,
+            temperature=0.1
+        )
+        import json
+        result = json.loads(response.choices[0].message.content.strip())
+        return result
+    except Exception as e:
+        logger.error(f"GPT parse task error: {{e}}")
+        return {{"title": text, "due_date": None, "due_time": None, "priority": 4, "description": ""}}
+
+def todoist_create_task(title: str, due_date: str = None, due_time: str = None,
+                         priority: int = 4, description: str = "") -> dict:
+    """Створює задачу в Todoist"""
+    if not TODOIST_TOKEN:
+        return None
+
+    headers = {{
+        "Authorization": f"Bearer {{TODOIST_TOKEN}}",
+        "Content-Type": "application/json"
+    }}
+
+    data = {{
+        "content": title,
+        "priority": priority,
+    }}
+
+    if description:
+        data["description"] = description
+
+    if due_date:
+        if due_time:
+            data["due_datetime"] = f"{{due_date}}T{{due_time}}:00"
+        else:
+            data["due_date"] = due_date
+
+    r = requests.post(f"{{TODOIST_API}}/tasks", json=data, headers=headers)
+    if r.status_code == 200:
+        return r.json()
+    else:
+        logger.error(f"Todoist error: {{r.status_code}} {{r.text}}")
+        return None
+
+async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎙 Надиктуй або напиши задачу.\n\n"
+        "Наприклад:\n"
+        "• Зателефонувати Валерію завтра о 15:00\n"
+        "• Терміново підготувати КП до п'ятниці\n"
+        "• Оплатити рахунок до 25 червня"
+    )
+    return WAIT_TASK_VOICE
+
+async def task_got_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.voice:
+        text = await transcribe_voice(update)
+        if not text:
+            return WAIT_TASK_VOICE
+    else:
+        text = update.message.text.strip()
+
+    await update.message.reply_text("🤖 Аналізую задачу...")
+
+    parsed = gpt_parse_task(text)
+
+    title = parsed.get("title", text)
+    due_date = parsed.get("due_date")
+    due_time = parsed.get("due_time")
+    priority = parsed.get("priority", 4)
+    description = parsed.get("description", "")
+
+    task = todoist_create_task(title, due_date, due_time, priority, description)
+
+    if task:
+        priority_labels = {1: "🔴 Терміново", 2: "🟠 Високий", 3: "🟡 Середній", 4: "⚪ Звичайний"}
+        date_str = ""
+        if due_date:
+            try:
+                d = datetime.strptime(due_date, "%Y-%m-%d")
+                date_str = d.strftime("%d.%m.%Y")
+                if due_time:
+                    date_str += f" о {due_time}"
+            except:
+                date_str = due_date
+
+        msg = "✅ Задачу додано в Todoist!\n\n"
+        msg += f"📌 *{title}*\n"
+        if date_str:
+            msg += f"📅 Дедлайн: {date_str}\n"
+        msg += priority_labels.get(priority, "⚪ Звичайний")
+        if description:
+            msg += f"\n💬 {description}"
+
+        if due_date and due_time:
+            try:
+                remind_dt = datetime.strptime(f"{due_date} {due_time}", "%Y-%m-%d %H:%M")
+                remind_dt = remind_dt - timedelta(minutes=30)
+                chat_id = update.effective_chat.id
+                scheduler.add_job(
+                    send_reminder, "date",
+                    run_date=remind_dt,
+                    args=[context.application, chat_id, f"⏰ Нагадування: {title}"],
+                    id=f"todoist_remind_{task['id']}",
+                    replace_existing=True
+                )
+                msg += "\n\n🔔 Нагадаю за 30 хв до дедлайну"
+            except Exception as e:
+                logger.error(f"Reminder error: {e}")
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Не вдалось створити задачу в Todoist. Перевір токен.")
+
+    return ConversationHandler.END
+
 async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     text_lower = text.lower()
@@ -962,6 +1112,8 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await remind_start(update, context)
     elif any(w in text_lower for w in ["статистика", "аналіз", "скільки", "перемовини", "проекти"]):
         return await stats_start(update, context)
+    elif any(w in text_lower for w in ["задач", "план", "зустріч", "нагадай в todoist", "додай в todoist"]):
+        return await task_start(update, context)
     else:
         await update.message.reply_text(
             "Не зрозумів 🤔 Спробуй:\n"
@@ -1059,9 +1211,23 @@ def main():
         allow_reentry=True,
     )
 
+
+    task_conv = ConversationHandler(
+        entry_points=[CommandHandler("task", task_start)],
+        states={
+            WAIT_TASK_VOICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, task_got_input),
+                MessageHandler(filters.VOICE, task_got_input),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clients", list_clients))
     app.add_handler(CommandHandler("debug", debug_lists))
+    app.add_handler(task_conv)
     app.add_handler(stats_conv)      # stats першим — щоб не конфліктував
     app.add_handler(new_lead_conv)
     app.add_handler(setdate_conv)
