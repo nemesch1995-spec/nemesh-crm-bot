@@ -598,7 +598,24 @@ async def remind_got_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # СПИСОК АКТИВНИХ КЛІЄНТІВ
 # ───────────────────────────────────────────────
 
+async def debug_lists(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показує реальні ID колонок з Trello — для діагностики"""
+    r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/lists", params=trello_params())
+    lists = r.json()
+    text = "🔍 *Колонки на дошці:*\n\n"
+    for lst in lists:
+        matched = ""
+        for col, col_id in COLUMNS.items():
+            if col_id == lst["id"]:
+                matched = f" ✅ `{col}`"
+        text += f"• `{lst['name']}` {matched}\n  `{lst['id']}`\n\n"
+    r2 = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
+    cards = r2.json()
+    text += f"*Всього карток на дошці: {len(cards)}*"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    load_lists()  # оновлюємо ID перед запитом
     list_id = COLUMNS.get("в роботі")
     if not list_id:
         await update.message.reply_text("❌ Не знайшов колонку 'В роботі'")
@@ -735,13 +752,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ───────────────────────────────────────────────
 
 async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Перезавантажуємо списки щоб мати актуальні ID
+    load_lists()
+
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
     cards = r.json()
 
-    active_lists = []
-    for lid in [COLUMNS.get("в роботі")]:
-        if lid:
-            active_lists.append(lid)
+    # Шукаємо в усіх активних колонках (не тільки "в роботі")
+    active_col_keys = ["в роботі", "новий лід", "перемовини", "пауза в роботі"]
+    active_lists = [COLUMNS[k] for k in active_col_keys if COLUMNS.get(k)]
 
     active_cards = [c for c in cards if c.get("idList") in active_lists]
 
@@ -949,6 +968,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clients", list_clients))
+    app.add_handler(CommandHandler("debug", debug_lists))
     app.add_handler(new_lead_conv)
     app.add_handler(setdate_conv)
     app.add_handler(comment_conv)
