@@ -758,11 +758,13 @@ async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
     cards = r.json()
 
-    # Шукаємо в усіх активних колонках (не тільки "в роботі")
-    active_col_keys = ["в роботі", "новий лід", "перемовини", "пауза в роботі"]
-    active_lists = [COLUMNS[k] for k in active_col_keys if COLUMNS.get(k)]
+    # Тільки клієнти "в роботі" — для яких фіксуємо дату старту реклами
+    work_list_id = COLUMNS.get("в роботі")
+    if not work_list_id:
+        await update.message.reply_text("❌ Не знайшов колонку 'В роботі'")
+        return ConversationHandler.END
 
-    active_cards = [c for c in cards if c.get("idList") in active_lists]
+    active_cards = [c for c in cards if c.get("idList") == work_list_id]
 
     if not active_cards:
         await update.message.reply_text("Немає активних клієнтів.")
