@@ -671,16 +671,16 @@ async def stats_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    # Маппінг швидких кнопок → реальні запити
-    quick_map = {
-        "📊 Скільки на перемовинах?": "Скільки проектів зараз на етапі перемовин? Перелічи їх.",
-        "🔥 Хто в роботі?": "Покажи всіх клієнтів які зараз в роботі з датами старту якщо є.",
-        "💤 Хто на паузі?": "Які проекти зараз на паузі і як давно вони там?",
-        "📈 Загальний огляд": "Зроби загальний огляд всіх проектів по статусах. Скільки в кожній колонці, на що звернути увагу.",
-        "✍️ Свій запит": None,
-    }
-
-    if text == "✍️ Свій запит":
+    # Маппінг — перевіряємо по ключовому слову, не точному збігу
+    if "перемовин" in text.lower():
+        query = "Скільки проектів зараз на етапі перемовин? Перелічи їх."
+    elif "роботі" in text.lower() or "роботи" in text.lower():
+        query = "Покажи всіх клієнтів які зараз в роботі з датами старту якщо є."
+    elif "паузі" in text.lower() or "пауз" in text.lower():
+        query = "Які проекти зараз на паузі і як давно вони там?"
+    elif "загальний" in text.lower() or "огляд" in text.lower():
+        query = "Зроби загальний огляд всіх проектів по статусах. Скільки в кожній колонці, на що звернути увагу."
+    elif "свій" in text.lower() or "запит" in text.lower():
         await update.message.reply_text(
             "Пиши запит — наприклад:\n"
             "• «які ліди без відповіді вже тиждень?»\n"
@@ -689,8 +689,9 @@ async def stats_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
         return WAIT_STATS_QUERY
-
-    query = quick_map.get(text, text)
+    else:
+        # Довільний запит від користувача
+        query = text
 
     await update.message.reply_text("🤖 Аналізую...", reply_markup=ReplyKeyboardRemove())
 
@@ -977,12 +978,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clients", list_clients))
     app.add_handler(CommandHandler("debug", debug_lists))
+    app.add_handler(stats_conv)      # stats першим — щоб не конфліктував
     app.add_handler(new_lead_conv)
     app.add_handler(setdate_conv)
     app.add_handler(comment_conv)
     app.add_handler(move_conv)
     app.add_handler(remind_conv)
-    app.add_handler(stats_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, smart_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
