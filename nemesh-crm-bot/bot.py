@@ -1005,8 +1005,12 @@ def todoist_create_task(title: str, due_date: str = None, due_time: str = None,
             data["due_date"] = due_date
 
     r = requests.post(f"{TODOIST_API}/tasks", json=data, headers=headers)
-    if r.status_code == 200:
-        return r.json()
+    logger.info(f"Todoist response: {r.status_code} | {r.text[:300]}")
+    if r.status_code in (200, 201, 204):
+        try:
+            return r.json()
+        except Exception:
+            return {"id": "ok"}
     else:
         logger.error(f"Todoist error: {r.status_code} {r.text}")
         return None
