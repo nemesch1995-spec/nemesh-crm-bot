@@ -21,16 +21,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TRELLO_KEY = os.getenv("TRELLO_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID", "X9M3JzKk")
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")  # твій Telegram ID
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 TRELLO_API = "https://api.trello.com/1"
 
-# Користувацькі поля
 CUSTOM_FIELD_DATE = "6a315fbc2805833132e855f7"
 CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
 
-# Стани розмови
 (
     WAIT_NAME, WAIT_SUMMARY, WAIT_CONTACTS, WAIT_SUM, WAIT_START_DATE,
     WAIT_COMMENT_NAME, WAIT_COMMENT_TEXT,
@@ -39,9 +37,9 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
     WAIT_COMMENT_REMIND,
     WAIT_SETDATE_CLIENT, WAIT_SETDATE_DATE,
     WAIT_NEWLEAD_REMIND, WAIT_NEWLEAD_REMIND_DATE,
-) = range(16)
+    WAIT_STATS_QUERY,
+) = range(17)
 
-# Колонки дошки
 COLUMNS = {
     "новий лід": "6a315f500cf27f0f4e7be45a",
     "перемовини": "6a315f6bff39a1ef901f07ae",
@@ -117,6 +115,117 @@ def set_custom_field_sum(card_id: str, amount: str):
         params={"key": TRELLO_KEY, "token": TRELLO_TOKEN}
     )
 
+def get_all_cards_with_lists():
+    """Повертає всі картки з назвою колонки"""
+    r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
+    cards = r.json()
+
+    # Зворотній маппінг id → назва колонки
+    id_to_col = {v: k for k, v in COLUMNS.items()}
+
+    result = []
+    for card in cards:
+        col_name = id_to_col.get(card.get("idList"), "невідомо")
+        result.append({
+            "name": card["name"],
+            "status": col_name,
+            "due": card.get("due", ""),
+            "desc": card.get("desc", ""),
+            "url": card.get("url", ""),
+        })
+    return result
+
+# ───────────────────────────────────────────────
+# GPT HELPERS
+# ───────────────────────────────────────────────
+
+def gpt_analyze_summary(summary_text: str) -> dict:
+    """
+    Витягує структуровані дані з summary розмови.
+    Повертає dict з ключами: budget, goal, pains, niche, next_step
+    """
+    if not OPENAI_API_KEY:
+        return {}
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    prompt = f"""Ти — CRM-асистент маркетингового агентства. 
+Проаналізуй summary розмови з потенційним клієнтом і витягни ключові деталі.
+
+Summary:
+{summary_text}
+
+Відповідай ТІЛЬКИ у форматі:
+🎯 Ціль: [що хоче досягти]
+💰 Бюджет: [бюджет або "не озвучено"]
+😤 Болі: [основні проблеми/болі клієнта]
+🏪 Ніша: [сфера бізнесу]
+➡️ Наступний крок: [що обговорили далі]
+
+Якщо якесь поле не згадується — пиши "не вказано". Відповідай українською."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.3
+        )
+        text = response.choices[0].message.content.strip()
+        return {"formatted": text}
+    except Exception as e:
+        logger.error(f"GPT analyze error: {e}")
+        return {}
+
+
+def gpt_stats_answer(query: str, cards: list) -> str:
+    """
+    Відповідає на довільний запит про проекти, спираючись на дані з Trello
+    """
+    if not OPENAI_API_KEY:
+        return "❌ OpenAI API ключ не налаштований"
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    # Формуємо зріз даних для GPT
+    cards_text = ""
+    for c in cards:
+        due_str = ""
+        if c["due"]:
+            try:
+                due_date = datetime.fromisoformat(c["due"].replace("Z", ""))
+                due_str = f", старт: {due_date.strftime('%d.%m.%Y')}"
+            except:
+                pass
+        cards_text += f"- {c['name']} | статус: {c['status']}{due_str}\n"
+
+    if not cards_text:
+        cards_text = "Карток не знайдено"
+
+    prompt = f"""Ти — CRM-аналітик маркетингового агентства NEMESH.
+
+Ось поточний стан проектів (дані з Trello):
+{cards_text}
+
+Запит від власника агентства: "{query}"
+
+Відповідай чітко, структуровано, українською. 
+Якщо запит про кількість — давай цифри і список.
+Якщо запит про аналіз — давай короткі висновки з рекомендаціями.
+Будь лаконічним, як розумний асистент, а не як звіт."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600,
+            temperature=0.4
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"GPT stats error: {e}")
+        return "❌ Помилка при аналізі. Спробуй ще раз."
+
 # ───────────────────────────────────────────────
 # /start
 # ───────────────────────────────────────────────
@@ -129,7 +238,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💬 /comment — додати коментар\n"
         "🔀 /move — змінити статус\n"
         "⏰ /remind — нагадування\n"
-        "📋 /clients — список активних клієнтів\n\n"
+        "📋 /clients — список активних клієнтів\n"
+        "📊 /stats — аналітика по проектах\n\n"
         "• /setdate — встановити дату старту\n\n"
         "Або просто пиши текстом — я зрозумію!"
     )
@@ -161,7 +271,22 @@ async def got_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text: return WAIT_SUMMARY
     else:
         text = update.message.text.strip()
+
     context.user_data["summary"] = text
+
+    # 🤖 GPT-аналіз summary
+    await update.message.reply_text("🤖 Аналізую розмову...")
+    analysis = gpt_analyze_summary(text)
+
+    if analysis.get("formatted"):
+        context.user_data["gpt_analysis"] = analysis["formatted"]
+        await update.message.reply_text(
+            f"📊 Витягнув ключові деталі:\n\n{analysis['formatted']}\n\n"
+            f"Якщо щось не так — просто продовжуємо далі, це збережеться в картці."
+        )
+    else:
+        context.user_data["gpt_analysis"] = ""
+
     await update.message.reply_text(
         "Контактні дані — нік в Telegram, Instagram, сайт (що є, через кому):"
     )
@@ -197,6 +322,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = context.user_data["summary"]
     contacts = context.user_data["contacts"]
     amount = context.user_data["sum"]
+    gpt_analysis = context.user_data.get("gpt_analysis", "")
 
     start_date = None
     due_iso = None
@@ -219,12 +345,16 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_custom_field_sum(card["id"], amount)
     if start_date:
         set_custom_field_date(card["id"], start_date.strftime("%Y-%m-%dT00:00:00.000Z"))
-    add_comment(card["id"], f"📋 Summary:\n{summary}")
+
+    # Зберігаємо summary + GPT-аналіз як коментар
+    comment_text = f"📋 Summary:\n{summary}"
+    if gpt_analysis:
+        comment_text += f"\n\n{gpt_analysis}"
+    add_comment(card["id"], comment_text)
 
     # Планування нагадувань
     chat_id = update.effective_chat.id
 
-    # Нагадування через 3 дні якщо не відповів
     remind_time = datetime.now() + timedelta(days=3)
     scheduler.add_job(
         send_reminder,
@@ -235,7 +365,6 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         replace_existing=True
     )
 
-    # Нагадування про оплату через місяць після старту
     if start_date:
         payment_date = start_date + timedelta(days=30)
         scheduler.add_job(
@@ -247,7 +376,6 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             replace_existing=True
         )
 
-        # Чекін через 2 тижні
         checkin_date = start_date + timedelta(days=14)
         scheduler.add_job(
             send_reminder,
@@ -272,7 +400,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["card_id_new"] = card["id"]
     context.user_data["card_name_new"] = name
     await update.message.reply_text(
-        f"\u2705 Картку {name} створено!{reminders_text}\n\nДодаткове нагадування?",
+        f"✅ Картку {name} створено!{reminders_text}\n\nДодаткове нагадування?",
         reply_markup=keyboard
     )
     return WAIT_NEWLEAD_REMIND
@@ -357,7 +485,7 @@ async def comment_got_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup([["⏰ Так, нагадати", "✅ Ні, все"]], one_time_keyboard=True, resize_keyboard=True)
     name = context.user_data["card_name"]
     await update.message.reply_text(
-        f"\u2705 Коментар додано до *{name}*\n\nПоставити нагадування по цьому клієнту?",
+        f"✅ Коментар додано до *{name}*\n\nПоставити нагадування по цьому клієнту?",
         parse_mode="Markdown"
     )
     return WAIT_COMMENT_REMIND
@@ -494,10 +622,61 @@ async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
+# ───────────────────────────────────────────────
+# /stats — AI-АНАЛІТИКА ПО ПРОЕКТАХ
+# ───────────────────────────────────────────────
 
+STATS_QUICK = [
+    ["📊 Скільки на перемовинах?", "🔥 Хто в роботі?"],
+    ["💤 Хто на паузі?", "📈 Загальний огляд"],
+    ["✍️ Свій запит"],
+]
+
+async def stats_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📊 *Аналітика проектів*\n\nОбери запит або напиши свій:",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(STATS_QUICK, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return WAIT_STATS_QUERY
+
+async def stats_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    # Маппінг швидких кнопок → реальні запити
+    quick_map = {
+        "📊 Скільки на перемовинах?": "Скільки проектів зараз на етапі перемовин? Перелічи їх.",
+        "🔥 Хто в роботі?": "Покажи всіх клієнтів які зараз в роботі з датами старту якщо є.",
+        "💤 Хто на паузі?": "Які проекти зараз на паузі і як давно вони там?",
+        "📈 Загальний огляд": "Зроби загальний огляд всіх проектів по статусах. Скільки в кожній колонці, на що звернути увагу.",
+        "✍️ Свій запит": None,
+    }
+
+    if text == "✍️ Свій запит":
+        await update.message.reply_text(
+            "Пиши запит — наприклад:\n"
+            "• «які ліди без відповіді вже тиждень?»\n"
+            "• «скільки грошей потенційно на перемовинах?»\n"
+            "• «хто може закритись цього місяця?»",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return WAIT_STATS_QUERY
+
+    query = quick_map.get(text, text)
+
+    await update.message.reply_text("🤖 Аналізую...", reply_markup=ReplyKeyboardRemove())
+
+    cards = get_all_cards_with_lists()
+    answer = gpt_stats_answer(query, cards)
+
+    await update.message.reply_text(answer)
+    return ConversationHandler.END
+
+# ───────────────────────────────────────────────
+# ГОЛОСОВІ ПОВІДОМЛЕННЯ
+# ───────────────────────────────────────────────
 
 async def transcribe_voice(update: Update) -> str | None:
-    """Розпізнає голосове і повертає текст"""
     if not OPENAI_API_KEY:
         await update.message.reply_text("❌ OpenAI API ключ не налаштований")
         return None
@@ -518,13 +697,7 @@ async def transcribe_voice(update: Update) -> str | None:
         await update.message.reply_text("❌ Помилка розпізнавання")
         return None
 
-# ───────────────────────────────────────────────
-# ГОЛОСОВІ ПОВІДОМЛЕННЯ
-# ───────────────────────────────────────────────
-
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Конвертує голосове поза розмовою"""
-    # Якщо є активна розмова — не перехоплюємо
     if context.user_data:
         return
 
@@ -557,13 +730,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Voice error: {e}")
         await update.message.reply_text("❌ Помилка розпізнавання. Спробуй ще раз.")
 
-
 # ───────────────────────────────────────────────
 # ВСТАНОВИТИ ДАТУ СТАРТУ
 # ───────────────────────────────────────────────
 
 async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Отримуємо список клієнтів з колонок "В роботі" і "Новий лід" і "Перемовини"
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
     cards = r.json()
 
@@ -580,7 +751,6 @@ async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["setdate_cards"] = {c["name"]: c["id"] for c in active_cards}
 
-    # Кнопки по 2 в ряд
     names = [c["name"] for c in active_cards]
     keyboard = [names[i:i+2] for i in range(0, len(names), 2)]
     keyboard.append(["❌ Скасувати"])
@@ -601,7 +771,6 @@ async def setdate_got_client(update: Update, context: ContextTypes.DEFAULT_TYPE)
     card_id = cards.get(text)
 
     if not card_id:
-        # Спробуємо знайти часткове співпадіння
         for name, cid in cards.items():
             if text.lower() in name.lower():
                 card_id = cid
@@ -632,7 +801,6 @@ async def setdate_got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_date = datetime.strptime(text, "%d.%m.%Y")
         set_custom_field_date(card_id, start_date.strftime("%Y-%m-%dT00:00:00.000Z"))
 
-        # Нагадування про оплату через місяць
         payment_date = start_date + timedelta(days=30)
         scheduler.add_job(
             send_reminder,
@@ -643,7 +811,6 @@ async def setdate_got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             replace_existing=True
         )
 
-        # Чекін через 2 тижні
         checkin_date = start_date + timedelta(days=14)
         scheduler.add_job(
             send_reminder,
@@ -681,6 +848,8 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await move_start(update, context)
     elif any(w in text for w in ["нагадай", "нагадування", "нагади"]):
         return await remind_start(update, context)
+    elif any(w in text for w in ["статистика", "аналіз", "скільки", "перемовини", "проекти"]):
+        return await stats_start(update, context)
     else:
         await update.message.reply_text(
             "Не зрозумів 🤔 Спробуй:\n"
@@ -688,7 +857,8 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /comment — коментар\n"
             "• /move — змінити статус\n"
             "• /remind — нагадування\n"
-            "• /clients — активні клієнти"
+            "• /clients — активні клієнти\n"
+            "• /stats — аналітика"
         )
 
 # ───────────────────────────────────────────────
@@ -768,6 +938,15 @@ def main():
         allow_reentry=True,
     )
 
+    stats_conv = ConversationHandler(
+        entry_points=[CommandHandler("stats", stats_start)],
+        states={
+            WAIT_STATS_QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, stats_got_query)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clients", list_clients))
     app.add_handler(new_lead_conv)
@@ -775,6 +954,7 @@ def main():
     app.add_handler(comment_conv)
     app.add_handler(move_conv)
     app.add_handler(remind_conv)
+    app.add_handler(stats_conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, smart_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
