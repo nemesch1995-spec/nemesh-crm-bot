@@ -968,7 +968,7 @@ def gpt_parse_task(text: str) -> dict:
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{{"role": "user", "content": prompt}}],
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
             temperature=0.1
         )
@@ -976,8 +976,8 @@ def gpt_parse_task(text: str) -> dict:
         result = json.loads(response.choices[0].message.content.strip())
         return result
     except Exception as e:
-        logger.error(f"GPT parse task error: {{e}}")
-        return {{"title": text, "due_date": None, "due_time": None, "priority": 4, "description": ""}}
+        logger.error(f"GPT parse task error: {e}")
+        return {"title": text, "due_date": None, "due_time": None, "priority": 4, "description": ""}
 
 def todoist_create_task(title: str, due_date: str = None, due_time: str = None,
                          priority: int = 4, description: str = "") -> dict:
@@ -985,30 +985,30 @@ def todoist_create_task(title: str, due_date: str = None, due_time: str = None,
     if not TODOIST_TOKEN:
         return None
 
-    headers = {{
-        "Authorization": f"Bearer {{TODOIST_TOKEN}}",
+    headers = {
+        "Authorization": f"Bearer {TODOIST_TOKEN}",
         "Content-Type": "application/json"
-    }}
+    }
 
-    data = {{
+    data = {
         "content": title,
         "priority": priority,
-    }}
+    }
 
     if description:
         data["description"] = description
 
     if due_date:
         if due_time:
-            data["due_datetime"] = f"{{due_date}}T{{due_time}}:00"
+            data["due_datetime"] = f"{due_date}T{due_time}:00"
         else:
             data["due_date"] = due_date
 
-    r = requests.post(f"{{TODOIST_API}}/tasks", json=data, headers=headers)
+    r = requests.post(f"{TODOIST_API}/tasks", json=data, headers=headers)
     if r.status_code == 200:
         return r.json()
     else:
-        logger.error(f"Todoist error: {{r.status_code}} {{r.text}}")
+        logger.error(f"Todoist error: {r.status_code} {r.text}")
         return None
 
 async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
