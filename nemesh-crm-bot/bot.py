@@ -868,17 +868,99 @@ async def setdate_got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # РОЗПІЗНАВАННЯ ТЕКСТУ (без команд)
 # ───────────────────────────────────────────────
 
+def get_card_comments(card_id: str) -> list:
+    """Тягне всі коментарі картки"""
+    r = requests.get(
+        f"{TRELLO_API}/cards/{card_id}/actions",
+        params=trello_params(filter="commentCard")
+    )
+    comments = []
+    for action in r.json():
+        text = action.get("data", {}).get("text", "")
+        date = action.get("date", "")[:10]
+        if text:
+            comments.append(f"[{date}] {text}")
+    return comments
+
+def gpt_client_answer(card: dict, comments: list) -> str:
+    """GPT формує відповідь про клієнта на основі картки і коментарів"""
+    if not OPENAI_API_KEY:
+        return "❌ OpenAI API ключ не налаштований"
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    id_to_col = {v: k for k, v in COLUMNS.items()}
+    status = id_to_col.get(card.get("idList"), "невідомо")
+
+    comments_text = "\n".join(comments) if comments else "Коментарів немає"
+
+    prompt = f"""Ти — CRM-асистент маркетингового агентства NEMESH.
+
+Власник агентства питає про клієнта. Ось дані:
+
+Клієнт: {card['name']}
+Статус: {status}
+Опис картки: {card.get('desc', 'немає')}
+
+Коментарі та нотатки:
+{comments_text}
+
+Дай чіткий короткий зріз: що відомо про клієнта, на якому етапі він зараз, що було останнє і що варто зробити далі. Відповідай українською, лаконічно."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"GPT client answer error: {e}")
+        return "❌ Помилка при аналізі"
+
+async def client_info(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
+    """Знаходить клієнта і відповідає AI-зрізом"""
+    card = find_card(name)
+    if not card:
+        await update.message.reply_text(f"❌ Не знайшов клієнта «{name}»")
+        return
+
+    await update.message.reply_text(f"🔍 Знайшов *{card['name']}*, аналізую...", parse_mode="Markdown")
+
+    comments = get_card_comments(card["id"])
+    answer = gpt_client_answer(card, comments)
+
+    await update.message.reply_text(answer)
+
 async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
-    if any(w in text for w in ["новий лід", "новий клієнт", "нова заявка"]):
+    text = update.message.text
+    text_lower = text.lower()
+
+    # AI-відповідь про клієнта: "що по Валерію?", "розкажи про Тамару", "статус axetron"
+    import re
+    client_patterns = [
+        r"що по (.+?)[\?\!\.]*$",
+        r"розкажи про (.+?)[\?\!\.]*$",
+        r"інфо по (.+?)[\?\!\.]*$",
+        r"як там (.+?)[\?\!\.]*$",
+        r"статус (.+?)[\?\!\.]*$",
+    ]
+    for pattern in client_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            client_name = match.group(1).strip()
+            return await client_info(update, context, client_name)
+
+    if any(w in text_lower for w in ["новий лід", "новий клієнт", "нова заявка"]):
         return await new_lead_start(update, context)
-    elif any(w in text for w in ["коментар", "нотатка", "додай"]):
+    elif any(w in text_lower for w in ["коментар", "нотатка", "додай"]):
         return await comment_start(update, context)
-    elif any(w in text for w in ["перемісти", "змін статус", "статус"]):
+    elif any(w in text_lower for w in ["перемісти", "змін статус"]):
         return await move_start(update, context)
-    elif any(w in text for w in ["нагадай", "нагадування", "нагади"]):
+    elif any(w in text_lower for w in ["нагадай", "нагадування", "нагади"]):
         return await remind_start(update, context)
-    elif any(w in text for w in ["статистика", "аналіз", "скільки", "перемовини", "проекти"]):
+    elif any(w in text_lower for w in ["статистика", "аналіз", "скільки", "перемовини", "проекти"]):
         return await stats_start(update, context)
     else:
         await update.message.reply_text(
@@ -888,7 +970,9 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /move — змінити статус\n"
             "• /remind — нагадування\n"
             "• /clients — активні клієнти\n"
-            "• /stats — аналітика"
+            "• /stats — аналітика\n\n"
+            "Або питай про клієнта: _«що по Валерію?»_",
+            parse_mode="Markdown"
         )
 
 # ───────────────────────────────────────────────
