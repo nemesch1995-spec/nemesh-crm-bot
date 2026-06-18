@@ -58,14 +58,25 @@ scheduler = AsyncIOScheduler()
 def trello_params(**kwargs):
     return {"key": TRELLO_KEY, "token": TRELLO_TOKEN, **kwargs}
 
+def normalize(s: str) -> str:
+    return (s.lower()
+              .replace("і", "i").replace("ї", "i")
+              .replace("'", "").replace("'", "")
+              .strip())
+
 def load_lists():
+    """Оновлює ID колонок з Trello. Якщо маппінг не знайдено — залишає захардкоджений ID."""
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/lists", params=trello_params())
+    if r.status_code != 200:
+        logger.warning("load_lists: не вдалось підключитись до Trello, використовуємо дефолтні ID")
+        return
     for lst in r.json():
-        name = lst["name"].lower().replace("і", "i")
+        trello_name = normalize(lst["name"])
         for col in COLUMNS:
-            col_norm = col.lower().replace("і", "i")
-            if col_norm in name:
+            col_norm = normalize(col)
+            if col_norm == trello_name or col_norm in trello_name or trello_name in col_norm:
                 COLUMNS[col] = lst["id"]
+                logger.info(f"Mapped '{col}' -> '{lst['name']}' ({lst['id']})")
                 break
 
 def get_list_id(name: str):
