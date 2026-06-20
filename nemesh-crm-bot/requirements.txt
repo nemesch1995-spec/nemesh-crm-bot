@@ -3,3 +3,4 @@ requests==2.31.0
 apscheduler==3.10.4
 python-dotenv==1.0.0
 openai==1.35.0
+pydub==0.25.1
