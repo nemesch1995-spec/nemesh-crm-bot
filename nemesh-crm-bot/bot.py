@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import json
 import requests
 import tempfile
 from openai import OpenAI
@@ -41,7 +43,8 @@ CUSTOM_FIELD_SUM = "6a315fcb13392d98b2f5927d"
     WAIT_NEWLEAD_REMIND, WAIT_NEWLEAD_REMIND_DATE,
     WAIT_STATS_QUERY,
     WAIT_TASK_VOICE,
-) = range(18)
+    WAIT_CALL_CLIENT, WAIT_CALL_STATUS_PICK, WAIT_CALL_CLIENT_PICK, WAIT_CALL_LINK,
+) = range(22)
 
 COLUMNS = {
     "новий лід": "6a315f500cf27f0f4e7be45a",
@@ -66,21 +69,6 @@ def normalize(s: str) -> str:
               .replace("і", "i").replace("ї", "i")
               .replace("'", "").replace("'", "")
               .strip())
-
-def load_lists():
-    """Оновлює ID колонок з Trello. Якщо маппінг не знайдено — залишає захардкоджений ID."""
-    r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/lists", params=trello_params())
-    if r.status_code != 200:
-        logger.warning("load_lists: не вдалось підключитись до Trello, використовуємо дефолтні ID")
-        return
-    for lst in r.json():
-        trello_name = normalize(lst["name"])
-        for col in COLUMNS:
-            col_norm = normalize(col)
-            if col_norm == trello_name or col_norm in trello_name or trello_name in col_norm:
-                COLUMNS[col] = lst["id"]
-                logger.info(f"Mapped '{col}' -> '{lst['name']}' ({lst['id']})")
-                break
 
 def get_list_id(name: str):
     name = name.lower().replace("і", "i")
@@ -134,7 +122,6 @@ def get_all_cards_with_lists():
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
     cards = r.json()
 
-    # Зворотній маппінг id → назва колонки
     id_to_col = {v: k for k, v in COLUMNS.items()}
 
     result = []
@@ -149,15 +136,31 @@ def get_all_cards_with_lists():
         })
     return result
 
+def get_cards_in_list(list_id: str):
+    """Повертає картки конкретної колонки {name: id}"""
+    r = requests.get(f"{TRELLO_API}/lists/{list_id}/cards", params=trello_params())
+    cards = r.json()
+    return {c["name"]: c["id"] for c in cards}
+
+def get_card_comments(card_id: str) -> list:
+    """Тягне всі коментарі картки"""
+    r = requests.get(
+        f"{TRELLO_API}/cards/{card_id}/actions",
+        params=trello_params(filter="commentCard")
+    )
+    comments = []
+    for action in r.json():
+        text = action.get("data", {}).get("text", "")
+        date = action.get("date", "")[:10]
+        if text:
+            comments.append(f"[{date}] {text}")
+    return comments
+
 # ───────────────────────────────────────────────
 # GPT HELPERS
 # ───────────────────────────────────────────────
 
 def gpt_analyze_summary(summary_text: str) -> dict:
-    """
-    Витягує структуровані дані з summary розмови.
-    Повертає dict з ключами: budget, goal, pains, niche, next_step
-    """
     if not OPENAI_API_KEY:
         return {}
 
@@ -192,16 +195,56 @@ Summary:
         return {}
 
 
+def gpt_analyze_call(transcript_text: str, call_date: str) -> str:
+    """
+    Аналізує ПОВНУ транскрипцію дзвінка (не коротке summary).
+    Більше шуму/small talk у вхідному тексті - промпт явно просить фільтрувати.
+    Формат виводу узгоджений з gpt_analyze_summary, але з заголовком дзвінка.
+    """
+    if not OPENAI_API_KEY:
+        return ""
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    prompt = f"""Ти — CRM-асистент маркетингового агентства NEMESH.
+Перед тобою повна транскрипція дзвінка власника агентства з клієнтом. 
+У ній багато "шуму": привітання, small talk, паузи, повтори, технічні збої зв'язку.
+Твоя задача — відфільтрувати все зайве і витягнути тільки суттєву ділову інформацію.
+
+Транскрипція дзвінка:
+{transcript_text}
+
+Відповідай ТІЛЬКИ у форматі (без жодних вступних фраз від себе):
+🎯 Ціль: [що хоче досягти клієнт]
+💰 Бюджет: [конкретна сума, ЯКЩО вона ЧІТКО і ОДНОЗНАЧНО прозвучала в розмові - інакше пиши "не озвучено". НІКОЛИ не вигадуй і не округлюй суму сам]
+😤 Болі: [основні проблеми/болі клієнта]
+🏪 Ніша: [сфера бізнесу]
+✅ Домовленості: [про що конкретно домовились]
+📅 Дати/терміни: [конкретні дати чи терміни, якщо прозвучали]
+➡️ Наступний крок: [що обговорили далі, хто що робить]
+
+Якщо якесь поле не згадується — пиши "не вказано". Відповідай українською, лаконічно, без води."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+            temperature=0.2
+        )
+        analysis = response.choices[0].message.content.strip()
+        return f"📞 Дзвінок {call_date}\n\n{analysis}"
+    except Exception as e:
+        logger.error(f"GPT call analyze error: {e}")
+        return ""
+
+
 def gpt_stats_answer(query: str, cards: list) -> str:
-    """
-    Відповідає на довільний запит про проекти, спираючись на дані з Trello
-    """
     if not OPENAI_API_KEY:
         return "❌ OpenAI API ключ не налаштований"
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Формуємо зріз даних для GPT
     cards_text = ""
     for c in cards:
         due_str = ""
@@ -240,6 +283,79 @@ def gpt_stats_answer(query: str, cards: list) -> str:
         logger.error(f"GPT stats error: {e}")
         return "❌ Помилка при аналізі. Спробуй ще раз."
 
+
+def gpt_client_answer(card: dict, comments: list) -> str:
+    if not OPENAI_API_KEY:
+        return "❌ OpenAI API ключ не налаштований"
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    id_to_col = {v: k for k, v in COLUMNS.items()}
+    status = id_to_col.get(card.get("idList"), "невідомо")
+
+    comments_text = "\n".join(comments) if comments else "Коментарів немає"
+
+    prompt = f"""Ти — CRM-асистент маркетингового агентства NEMESH.
+
+Власник агентства питає про клієнта. Ось дані:
+
+Клієнт: {card['name']}
+Статус: {status}
+Опис картки: {card.get('desc', 'немає')}
+
+Коментарі та нотатки:
+{comments_text}
+
+Дай чіткий короткий зріз: що відомо про клієнта, на якому етапі він зараз, що було останнє і що варто зробити далі. Відповідай українською, лаконічно."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"GPT client answer error: {e}")
+        return "❌ Помилка при аналізі"
+
+
+def gpt_parse_task(text: str) -> dict:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    today = datetime.now().strftime("%d.%m.%Y")
+    prompt = f"""Сьогодні {today}. Ти — асистент з планування. 
+Проаналізуй текст і витягни задачу для Todoist.
+
+Текст: "{text}"
+
+Відповідай ТІЛЬКИ у форматі JSON (без markdown):
+{{
+  "title": "назва задачі",
+  "due_date": "YYYY-MM-DD або null якщо дата не вказана",
+  "due_time": "HH:MM або null якщо час не вказаний",
+  "priority": 4,
+  "description": "додаткові деталі якщо є або пустий рядок"
+}}
+
+Пріоритет: 4=звичайний, 3=середній, 2=високий, 1=терміновий.
+Визнач пріоритет за словами: терміново/важливо/критично → 1-2, звичайні задачі → 3-4.
+Дати: сьогодні={today}, завтра=наступний день, "в п'ятницю"=найближча п'ятниця тощо."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.1
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        return result
+    except Exception as e:
+        logger.error(f"GPT parse task error: {e}")
+        return {"title": text, "due_date": None, "due_time": None, "priority": 4, "description": ""}
+
 # ───────────────────────────────────────────────
 # /start
 # ───────────────────────────────────────────────
@@ -253,7 +369,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔀 /move — змінити статус\n"
         "⏰ /remind — нагадування\n"
         "📋 /clients — список активних клієнтів\n"
-        "📊 /stats — аналітика по проектах\n\n"
+        "📊 /stats — аналітика по проектах\n"
+        "📞 /call_summary — додати запис дзвінка клієнту\n\n"
         "• /setdate — встановити дату старту\n\n"
         "Або просто пиши текстом — я зрозумію!"
     )
@@ -275,7 +392,8 @@ async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
     context.user_data["name"] = text
     await update.message.reply_text(
-        "Надиктуй summary розмови — про що говорили, що зрозумів, на чому зупинились:"
+        "Надиктуй summary розмови — про що говорили, що зрозумів, на чому зупинились.\n\n"
+        "Або кинь посилання на Google Drive із повним записом дзвінка — я сам зроблю транскрипцію і аналіз:"
     )
     return WAIT_SUMMARY
 
@@ -283,23 +401,39 @@ async def got_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.voice:
         text = await transcribe_voice(update)
         if not text: return WAIT_SUMMARY
+        gpt_analysis_text = None
     else:
         text = update.message.text.strip()
+        drive_link = extract_drive_link(text)
+        if drive_link:
+            # Повний запис дзвінка замість короткого summary
+            result = await process_call_recording(update, drive_link)
+            if result is None:
+                return WAIT_SUMMARY
+            text, gpt_analysis_text = result
+        else:
+            gpt_analysis_text = None
 
     context.user_data["summary"] = text
 
-    # 🤖 GPT-аналіз summary
-    await update.message.reply_text("🤖 Аналізую розмову...")
-    analysis = gpt_analyze_summary(text)
-
-    if analysis.get("formatted"):
-        context.user_data["gpt_analysis"] = analysis["formatted"]
+    if gpt_analysis_text:
+        # вже проаналізовано через gpt_analyze_call (повний дзвінок)
+        context.user_data["gpt_analysis"] = gpt_analysis_text
         await update.message.reply_text(
-            f"📊 Витягнув ключові деталі:\n\n{analysis['formatted']}\n\n"
+            f"📊 Витягнув ключові деталі з запису:\n\n{gpt_analysis_text}\n\n"
             f"Якщо щось не так — просто продовжуємо далі, це збережеться в картці."
         )
     else:
-        context.user_data["gpt_analysis"] = ""
+        await update.message.reply_text("🤖 Аналізую розмову...")
+        analysis = gpt_analyze_summary(text)
+        if analysis.get("formatted"):
+            context.user_data["gpt_analysis"] = analysis["formatted"]
+            await update.message.reply_text(
+                f"📊 Витягнув ключові деталі:\n\n{analysis['formatted']}\n\n"
+                f"Якщо щось не так — просто продовжуємо далі, це збережеться в картці."
+            )
+        else:
+            context.user_data["gpt_analysis"] = ""
 
     await update.message.reply_text(
         "Контактні дані — нік в Telegram, Instagram, сайт (що є, через кому):"
@@ -341,7 +475,7 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_date = None
     due_iso = None
 
-    if text.lower() not in ["пропустити", "⏭ пропустити", "пропустити", "skip"]:
+    if text.lower() not in ["пропустити", "⏭ пропустити", "skip"]:
         try:
             start_date = datetime.strptime(text, "%d.%m.%Y")
             due_iso = start_date.isoformat() + "Z"
@@ -360,13 +494,11 @@ async def got_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if start_date:
         set_custom_field_date(card["id"], start_date.strftime("%Y-%m-%dT00:00:00.000Z"))
 
-    # Зберігаємо summary + GPT-аналіз як коментар
     comment_text = f"📋 Summary:\n{summary}"
     if gpt_analysis:
         comment_text += f"\n\n{gpt_analysis}"
     add_comment(card["id"], comment_text)
 
-    # Планування нагадувань
     chat_id = update.effective_chat.id
 
     remind_time = datetime.now() + timedelta(days=3)
@@ -609,11 +741,10 @@ async def remind_got_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ───────────────────────────────────────────────
-# СПИСОК АКТИВНИХ КЛІЄНТІВ
+# СПИСОК АКТИВНИХ КЛІЄНТІВ / DEBUG
 # ───────────────────────────────────────────────
 
 async def debug_lists(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показує реальні ID колонок з Trello — для діагностики"""
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/lists", params=trello_params())
     lists = r.json()
     text = "🔍 *Колонки на дошці:*\n\n"
@@ -629,7 +760,6 @@ async def debug_lists(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pass  # ID захардкоджені напряму
     list_id = COLUMNS.get("в роботі")
     if not list_id:
         await update.message.reply_text("❌ Не знайшов колонку 'В роботі'")
@@ -674,7 +804,6 @@ async def stats_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    # Маппінг — перевіряємо по ключовому слову, не точному збігу
     if "перемовин" in text.lower():
         query = "Скільки проектів зараз на етапі перемовин? Перелічи їх."
     elif "роботі" in text.lower() or "роботи" in text.lower():
@@ -693,7 +822,6 @@ async def stats_got_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAIT_STATS_QUERY
     else:
-        # Довільний запит від користувача
         query = text
 
     await update.message.reply_text("🤖 Аналізую...", reply_markup=ReplyKeyboardRemove())
@@ -723,6 +851,7 @@ async def transcribe_voice(update: Update) -> str | None:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", file=audio_file, language="uk"
             )
+        os.remove(tmp_path)
         return transcript.text
     except Exception as e:
         logger.error(f"Voice error: {e}")
@@ -752,6 +881,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file=audio_file,
                 language="uk"
             )
+        os.remove(tmp_path)
 
         text = transcript.text
         await update.message.reply_text(f"📝 Розпізнано: {text}")
@@ -770,7 +900,6 @@ async def setdate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     r = requests.get(f"{TRELLO_API}/boards/{TRELLO_BOARD_ID}/cards", params=trello_params())
     cards = r.json()
 
-    # Тільки клієнти "в роботі" — для яких фіксуємо дату старту реклами
     work_list_id = COLUMNS.get("в роботі")
     if not work_list_id:
         await update.message.reply_text("❌ Не знайшов колонку 'В роботі'")
@@ -868,62 +997,10 @@ async def setdate_got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ───────────────────────────────────────────────
-# РОЗПІЗНАВАННЯ ТЕКСТУ (без команд)
+# РОЗПІЗНАВАННЯ ТЕКСТУ (без команд) + AI-зріз по клієнту
 # ───────────────────────────────────────────────
 
-def get_card_comments(card_id: str) -> list:
-    """Тягне всі коментарі картки"""
-    r = requests.get(
-        f"{TRELLO_API}/cards/{card_id}/actions",
-        params=trello_params(filter="commentCard")
-    )
-    comments = []
-    for action in r.json():
-        text = action.get("data", {}).get("text", "")
-        date = action.get("date", "")[:10]
-        if text:
-            comments.append(f"[{date}] {text}")
-    return comments
-
-def gpt_client_answer(card: dict, comments: list) -> str:
-    """GPT формує відповідь про клієнта на основі картки і коментарів"""
-    if not OPENAI_API_KEY:
-        return "❌ OpenAI API ключ не налаштований"
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    id_to_col = {v: k for k, v in COLUMNS.items()}
-    status = id_to_col.get(card.get("idList"), "невідомо")
-
-    comments_text = "\n".join(comments) if comments else "Коментарів немає"
-
-    prompt = f"""Ти — CRM-асистент маркетингового агентства NEMESH.
-
-Власник агентства питає про клієнта. Ось дані:
-
-Клієнт: {card['name']}
-Статус: {status}
-Опис картки: {card.get('desc', 'немає')}
-
-Коментарі та нотатки:
-{comments_text}
-
-Дай чіткий короткий зріз: що відомо про клієнта, на якому етапі він зараз, що було останнє і що варто зробити далі. Відповідай українською, лаконічно."""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-            temperature=0.3
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"GPT client answer error: {e}")
-        return "❌ Помилка при аналізі"
-
 async def client_info(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
-    """Знаходить клієнта і відповідає AI-зрізом"""
     card = find_card(name)
     if not card:
         await update.message.reply_text(f"❌ Не знайшов клієнта «{name}»")
@@ -941,47 +1018,8 @@ async def client_info(update: Update, context: ContextTypes.DEFAULT_TYPE, name: 
 # TODOIST — ПЛАНУВАННЯ ЗАДАЧ ГОЛОСОМ
 # ───────────────────────────────────────────────
 
-def gpt_parse_task(text: str) -> dict:
-    """GPT витягує з тексту: назву задачі, дату, час, пріоритет"""
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    today = datetime.now().strftime("%d.%m.%Y")
-    prompt = f"""Сьогодні {today}. Ти — асистент з планування. 
-Проаналізуй текст і витягни задачу для Todoist.
-
-Текст: "{text}"
-
-Відповідай ТІЛЬКИ у форматі JSON (без markdown):
-{{
-  "title": "назва задачі",
-  "due_date": "YYYY-MM-DD або null якщо дата не вказана",
-  "due_time": "HH:MM або null якщо час не вказаний",
-  "priority": 4,
-  "description": "додаткові деталі якщо є або пустий рядок"
-}}
-
-Пріоритет: 4=звичайний, 3=середній, 2=високий, 1=терміновий.
-Визнач пріоритет за словами: терміново/важливо/критично → 1-2, звичайні задачі → 3-4.
-Дати: сьогодні={today}, завтра=наступний день, "в п'ятницю"=найближча п'ятниця тощо."""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.1
-        )
-        import json
-        result = json.loads(response.choices[0].message.content.strip())
-        return result
-    except Exception as e:
-        logger.error(f"GPT parse task error: {e}")
-        return {"title": text, "due_date": None, "due_time": None, "priority": 4, "description": ""}
-
 def todoist_create_task(title: str, due_date: str = None, due_time: str = None,
                          priority: int = 4, description: str = "") -> dict:
-    """Створює задачу в Todoist"""
     if not TODOIST_TOKEN:
         return None
 
@@ -1091,8 +1129,6 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     text_lower = text.lower()
 
-    # AI-відповідь про клієнта: "що по Валерію?", "розкажи про Тамару", "статус axetron"
-    import re
     client_patterns = [
         r"що по (.+?)[\?\!\.]*$",
         r"розкажи про (.+?)[\?\!\.]*$",
@@ -1118,6 +1154,8 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await stats_start(update, context)
     elif any(w in text_lower for w in ["задач", "план", "зустріч", "нагадай в todoist", "додай в todoist"]):
         return await task_start(update, context)
+    elif any(w in text_lower for w in ["дзвінок", "зідзвон", "запис розмови"]):
+        return await call_summary_start(update, context)
     else:
         await update.message.reply_text(
             "Не зрозумів 🤔 Спробуй:\n"
@@ -1126,7 +1164,8 @@ async def smart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /move — змінити статус\n"
             "• /remind — нагадування\n"
             "• /clients — активні клієнти\n"
-            "• /stats — аналітика\n\n"
+            "• /stats — аналітика\n"
+            "• /call_summary — запис дзвінка\n\n"
             "Або питай про клієнта: _«що по Валерію?»_",
             parse_mode="Markdown"
         )
@@ -1141,6 +1180,335 @@ async def send_reminder(app, chat_id, text):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Скасовано.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
+
+
+# ═════════════════════════════════════════════════════════════
+# ОБРОБКА ЗАПИСІВ ДЗВІНКІВ (Google Drive → транскрипція → GPT)
+# ═════════════════════════════════════════════════════════════
+
+DRIVE_LINK_PATTERN = re.compile(
+    r"(?:https?://)?(?:drive|docs)\.google\.com/\S+"
+)
+
+MAX_WHISPER_CHUNK_BYTES = 24 * 1024 * 1024  # трохи менше за ліміт 25MB Whisper
+
+def extract_drive_link(text: str) -> str | None:
+    """Шукає Google Drive посилання в тексті. Повертає None якщо не знайдено."""
+    match = DRIVE_LINK_PATTERN.search(text)
+    if match:
+        return match.group(0)
+    return None
+
+def extract_drive_file_id(url: str) -> str | None:
+    """
+    Витягує file_id з різних форматів Google Drive посилань:
+    - https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+    - https://drive.google.com/open?id=FILE_ID
+    - https://docs.google.com/.../d/FILE_ID/...
+    """
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"[?&]id=([a-zA-Z0-9_-]+)",
+        r"/d/([a-zA-Z0-9_-]+)",
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
+
+def download_drive_file(url: str, dest_path: str) -> bool:
+    """
+    Качає файл з Google Drive за публічним посиланням ("у кого є посилання").
+    Обробляє підтвердження для великих файлів (Drive показує сторінку-застереження
+    "файл завеликий для перевірки на віруси" і вимагає підтвердження).
+    """
+    file_id = extract_drive_file_id(url)
+    if not file_id:
+        return False
+
+    session = requests.Session()
+    base_url = "https://drive.google.com/uc?export=download"
+
+    response = session.get(base_url, params={"id": file_id}, stream=True)
+
+    confirm_token = None
+    for key, value in response.cookies.items():
+        if key.startswith("download_warning"):
+            confirm_token = value
+            break
+
+    if confirm_token:
+        response = session.get(
+            base_url,
+            params={"id": file_id, "confirm": confirm_token},
+            stream=True
+        )
+
+    if response.headers.get("Content-Type", "").startswith("text/html"):
+        m = re.search(r'confirm=([0-9A-Za-z_]+)', response.text)
+        if m:
+            response = session.get(
+                base_url,
+                params={"id": file_id, "confirm": m.group(1)},
+                stream=True
+            )
+
+    if response.status_code != 200:
+        logger.error(f"Drive download failed: {response.status_code}")
+        return False
+
+    with open(dest_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+
+    return True
+
+
+def convert_to_audio(input_path: str, output_path: str) -> bool:
+    """Конвертує відео/будь-який медіафайл у компактний аудіофайл (mp3) через ffmpeg."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", input_path,
+                "-vn",
+                "-acodec", "libmp3lame",
+                "-ar", "16000",
+                "-ac", "1",
+                "-b:a", "64k",
+                output_path
+            ],
+            capture_output=True,
+            timeout=1800,
+        )
+        if result.returncode != 0:
+            logger.error(f"ffmpeg error: {result.stderr.decode(errors='ignore')[:500]}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"ffmpeg exception: {e}")
+        return False
+
+
+def split_audio_into_chunks(audio_path: str, max_bytes: int = MAX_WHISPER_CHUNK_BYTES) -> list:
+    """Ріже аудіофайл на шматки по тривалості, орієнтуючись на максимальний розмір у байтах."""
+    from pydub import AudioSegment
+
+    audio = AudioSegment.from_file(audio_path)
+    total_bytes = os.path.getsize(audio_path)
+    duration_ms = len(audio)
+
+    if total_bytes <= max_bytes:
+        return [audio_path]
+
+    num_chunks = (total_bytes // max_bytes) + 1
+    chunk_duration_ms = duration_ms // num_chunks
+
+    chunk_paths = []
+    for i in range(num_chunks):
+        start = i * chunk_duration_ms
+        end = min((i + 1) * chunk_duration_ms, duration_ms)
+        chunk = audio[start:end]
+        chunk_path = f"{audio_path}_chunk{i}.mp3"
+        chunk.export(chunk_path, format="mp3", bitrate="64k")
+        chunk_paths.append(chunk_path)
+
+    return chunk_paths
+
+
+def transcribe_long_audio(audio_path: str) -> str:
+    """Транскрибує аудіофайл будь-якого розміру: ріже на чанки якщо треба, склеює текст."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    chunk_paths = split_audio_into_chunks(audio_path)
+    full_text = []
+
+    for chunk_path in chunk_paths:
+        with open(chunk_path, "rb") as f:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", file=f, language="uk"
+            )
+        full_text.append(transcript.text)
+        if chunk_path != audio_path:
+            try:
+                os.remove(chunk_path)
+            except OSError:
+                pass
+
+    return "\n".join(full_text)
+
+
+async def process_call_recording(update: Update, drive_link: str):
+    """
+    Повний цикл: скачує файл з Drive → конвертує в аудіо → транскрибує → GPT-аналіз.
+    Повертає (transcript_text, formatted_analysis) або None при помилці.
+    Шле проміжні статуси користувачу.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        raw_path = os.path.join(tmp_dir, "raw_download")
+        audio_path = os.path.join(tmp_dir, "audio.mp3")
+
+        await update.message.reply_text("📥 Качаю запис з Google Drive…")
+
+        ok = download_drive_file(drive_link, raw_path)
+        if not ok or not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
+            await update.message.reply_text(
+                "❌ Не вдалось скачати файл з Drive.\n"
+                "Перевір, що посилання відкрите за принципом «у кого є посилання — може переглянути», "
+                "і що це пряме посилання на файл (не на папку)."
+            )
+            return None
+
+        await update.message.reply_text("🎬 Конвертую запис в аудіо…")
+        ok = convert_to_audio(raw_path, audio_path)
+        if not ok:
+            await update.message.reply_text("❌ Не вдалось конвертувати файл. Перевір формат запису.")
+            return None
+
+        await update.message.reply_text("🎙 Транскрибую розмову (це може зайняти кілька хвилин)…")
+        try:
+            transcript_text = transcribe_long_audio(audio_path)
+        except Exception as e:
+            logger.error(f"Transcription error: {e}")
+            await update.message.reply_text("❌ Помилка під час транскрипції.")
+            return None
+
+        if not transcript_text.strip():
+            await update.message.reply_text("❌ Не вдалось розпізнати текст у записі.")
+            return None
+
+        await update.message.reply_text("🤖 Аналізую розмову…")
+        call_date = datetime.now().strftime("%d.%m.%Y")
+        analysis = gpt_analyze_call(transcript_text, call_date)
+
+        if not analysis:
+            await update.message.reply_text("❌ Помилка при аналізі розмови.")
+            return None
+
+        return transcript_text, analysis
+
+
+# ───────────────────────────────────────────────
+# /call_summary — додати запис дзвінка до ІСНУЮЧОГО клієнта
+# ───────────────────────────────────────────────
+
+async def call_summary_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    keyboard = ReplyKeyboardMarkup(
+        [["📋 Обрати зі списку"]],
+        one_time_keyboard=True, resize_keyboard=True
+    )
+    await update.message.reply_text(
+        "Чий це дзвінок? Введи ім'я клієнта або обери зі списку:",
+        reply_markup=keyboard
+    )
+    return WAIT_CALL_CLIENT
+
+async def call_got_client_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if "обрати" in text.lower() or "список" in text.lower():
+        keyboard = ReplyKeyboardMarkup(
+            STATUS_KEYBOARD, one_time_keyboard=True, resize_keyboard=True
+        )
+        await update.message.reply_text(
+            "З якого статусу клієнт?",
+            reply_markup=keyboard
+        )
+        return WAIT_CALL_STATUS_PICK
+
+    card = find_card(text)
+    if not card:
+        await update.message.reply_text(
+            "❌ Картку не знайдено. Перевір ім'я, або спочатку додай клієнта через /new_lead."
+        )
+        return ConversationHandler.END
+
+    context.user_data["call_card_id"] = card["id"]
+    context.user_data["call_card_name"] = card["name"]
+    await update.message.reply_text(
+        f"Знайшов *{card['name']}*.\n\nСкинь посилання на Google Drive із записом дзвінка:",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return WAIT_CALL_LINK
+
+async def call_got_status_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = update.message.text.strip()
+    list_id = get_list_id(status)
+    if not list_id:
+        await update.message.reply_text("❌ Не знайшов таку колонку. Спробуй ще раз.")
+        return WAIT_CALL_STATUS_PICK
+
+    cards = get_cards_in_list(list_id)
+    if not cards:
+        await update.message.reply_text(
+            f"У колонці «{status}» немає карток. Обери інший статус.",
+        )
+        return WAIT_CALL_STATUS_PICK
+
+    context.user_data["call_status_cards"] = cards
+    names = list(cards.keys())
+    keyboard = [names[i:i+2] for i in range(0, len(names), 2)]
+    keyboard.append(["❌ Скасувати"])
+
+    await update.message.reply_text(
+        "Обери клієнта:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return WAIT_CALL_CLIENT_PICK
+
+async def call_got_client_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "❌ Скасувати":
+        await update.message.reply_text("Скасовано.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+    cards = context.user_data.get("call_status_cards", {})
+    card_id = cards.get(text)
+
+    if not card_id:
+        await update.message.reply_text("❌ Не знайшов такого клієнта в списку. Спробуй ще раз.")
+        return WAIT_CALL_CLIENT_PICK
+
+    context.user_data["call_card_id"] = card_id
+    context.user_data["call_card_name"] = text
+    await update.message.reply_text(
+        f"Обрав *{text}*.\n\nСкинь посилання на Google Drive із записом дзвінка:",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return WAIT_CALL_LINK
+
+async def call_got_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    drive_link = extract_drive_link(text)
+
+    if not drive_link:
+        await update.message.reply_text(
+            "❌ Не бачу посилання на Google Drive у повідомленні. Скинь лінк ще раз."
+        )
+        return WAIT_CALL_LINK
+
+    card_id = context.user_data.get("call_card_id")
+    card_name = context.user_data.get("call_card_name", "")
+
+    result = await process_call_recording(update, drive_link)
+    if result is None:
+        return ConversationHandler.END
+
+    transcript_text, analysis = result
+
+    add_comment(card_id, analysis)
+
+    await update.message.reply_text(
+        f"✅ Додав запис дзвінка в картку *{card_name}*\n\n{analysis}",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
 
 # ───────────────────────────────────────────────
 # MAIN
@@ -1215,7 +1583,6 @@ def main():
         allow_reentry=True,
     )
 
-
     task_conv = ConversationHandler(
         entry_points=[CommandHandler("task", task_start)],
         states={
@@ -1228,11 +1595,24 @@ def main():
         allow_reentry=True,
     )
 
+    call_summary_conv = ConversationHandler(
+        entry_points=[CommandHandler("call_summary", call_summary_start)],
+        states={
+            WAIT_CALL_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, call_got_client_text)],
+            WAIT_CALL_STATUS_PICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, call_got_status_pick)],
+            WAIT_CALL_CLIENT_PICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, call_got_client_pick)],
+            WAIT_CALL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, call_got_link)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clients", list_clients))
     app.add_handler(CommandHandler("debug", debug_lists))
     app.add_handler(task_conv)
-    app.add_handler(stats_conv)      # stats першим — щоб не конфліктував
+    app.add_handler(call_summary_conv)
+    app.add_handler(stats_conv)
     app.add_handler(new_lead_conv)
     app.add_handler(setdate_conv)
     app.add_handler(comment_conv)
@@ -1242,7 +1622,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     scheduler.start()
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
