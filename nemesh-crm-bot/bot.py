@@ -1258,10 +1258,24 @@ def download_drive_file(url: str, dest_path: str) -> bool:
         logger.error(f"Drive download failed: {response.status_code}")
         return False
 
+    content_type = response.headers.get("Content-Type", "unknown")
+    logger.info(f"Drive download: Content-Type={content_type}")
+
     with open(dest_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
+
+    downloaded_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+    logger.info(f"Drive download: saved {downloaded_size} bytes to {dest_path}")
+
+    # Якщо файл підозріло малий і Content-Type текстовий — це майже напевно
+    # HTML-сторінка підтвердження Google, а не реальний файл
+    if downloaded_size < 100_000 and "text" in content_type.lower():
+        with open(dest_path, "r", errors="ignore") as f:
+            preview = f.read(300)
+        logger.error(f"Drive download looks like HTML, not a media file. Preview: {preview}")
+        return False
 
     return True
 
@@ -1270,6 +1284,9 @@ def convert_to_audio(input_path: str, output_path: str) -> bool:
     """Конвертує відео/будь-який медіафайл у компактний аудіофайл (mp3) через ffmpeg."""
     import subprocess
     try:
+        in_size = os.path.getsize(input_path) if os.path.exists(input_path) else -1
+        logger.info(f"convert_to_audio: input={input_path} size={in_size} bytes")
+
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", input_path,
@@ -1284,8 +1301,14 @@ def convert_to_audio(input_path: str, output_path: str) -> bool:
             timeout=1800,
         )
         if result.returncode != 0:
-            logger.error(f"ffmpeg error: {result.stderr.decode(errors='ignore')[:500]}")
+            stderr_text = result.stderr.decode(errors="ignore")
+            # Банер версії ffmpeg займає перші рядки — нам потрібен ХВІСТ, де реальна причина
+            logger.error(f"ffmpeg returncode={result.returncode}")
+            logger.error(f"ffmpeg stderr (last 1500 chars): {stderr_text[-1500:]}")
             return False
+
+        out_size = os.path.getsize(output_path) if os.path.exists(output_path) else -1
+        logger.info(f"convert_to_audio: output={output_path} size={out_size} bytes")
         return True
     except Exception as e:
         logger.error(f"ffmpeg exception: {e}")
